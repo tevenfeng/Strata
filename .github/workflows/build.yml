@@ -81,10 +81,10 @@ jobs:
         run: |
           docker run --rm -v "$PWD/ci-artifacts:/a" nvidia/cuda:13.0.0-devel-ubuntu24.04 bash -lc '
             echo "strata cubins:"; cuobjdump --list-elf /a/engine/strata 2>/dev/null | grep -oE "sm_[0-9]+" | sort -u | tr "\n" " "; echo
-            echo "strata ptx (cuobjdump):"; cuobjdump --list-ptx /a/engine/strata 2>&1 | head -4
+            echo "strata ptx (cuobjdump):"; cuobjdump --list-ptx /a/engine/strata 2>/dev/null | grep -oE "sm_[0-9a-z]+" | sort -u | tr "\n" " "; echo
             echo "strata ptx (strings):"; grep -aoE "\.target sm_[0-9a-z]+" /a/engine/strata | sort -u | tr "\n" " "; echo
             echo "vision cubins:"; cuobjdump --list-elf /a/engine/strata-vision 2>/dev/null | grep -oE "sm_[0-9]+" | sort -u | tr "\n" " "; echo
-            if cuobjdump --list-ptx /a/engine/strata 2>/dev/null | grep -q "compute_" || grep -aq "\.target sm_" /a/engine/strata; then echo 1 > /a/ptx.txt; else echo 0 > /a/ptx.txt; fi
+            if cuobjdump --list-ptx /a/engine/strata 2>/dev/null | grep -q "\.ptx" || grep -aq "\.target sm_" /a/engine/strata; then echo 1 > /a/ptx.txt; else echo 0 > /a/ptx.txt; fi
           ' || echo 0 > ci-artifacts/ptx.txt
 
       - name: Package the Linux prebuilt zip
