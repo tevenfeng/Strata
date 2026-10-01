@@ -59,7 +59,14 @@ jobs:
         run: |
           ARCHS="${ARCHS:-$DEFAULT_ARCHS}"
           echo "archs: $ARCHS"
-          docker build --build-arg CUDA_ARCHITECTURES="$ARCHS" -t strata-build .
+          # --network host: the docker bridge on runners occasionally stalls large
+          # downloads (pip).  Retries resume at the failed layer from BuildKit's cache.
+          for attempt in 1 2 3; do
+            docker build --network host --build-arg CUDA_ARCHITECTURES="$ARCHS" -t strata-build . && break
+            echo "::warning::docker build attempt $attempt failed"
+            if [ "$attempt" = "3" ]; then exit 1; fi
+            sleep 20
+          done
 
       - name: Extract engine and llama.cpp from the build image
         run: |
@@ -128,7 +135,7 @@ jobs:
 
       - name: Assemble the image
         run: |
-          docker buildx build --load \
+          docker buildx build --load --network host \
             --build-context engine="$RUNNER_TEMP/artifacts/engine" \
             --build-context llama="$RUNNER_TEMP/artifacts/llama.cpp" \
             --cache-from type=gha,scope=strata-image \
