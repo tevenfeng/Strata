@@ -1,0 +1,167 @@
+# Build Strata on GitHub Actions:
+#   engine — compiles the engine with the upstream Dockerfile (CUDA 13.0 devel image,
+#            the same way the Windows release is built) and packages the Linux prebuilt
+#            zip: strata, strata-vision, BUILD.json — attached to the release.
+#   image  — assembles the slim runtime image from that prebuilt engine (no compiler,
+#            no CUDA toolkit inside) and pushes it to GHCR.
+#
+# Runs when a release is published, or by hand from the Actions tab.
+# Runtime image: see docker/README.md. Upstream Dockerfile: ./Dockerfile.
+name: build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      archs:
+        description: "CUDA architectures for the engine fatbin (cubins + PTX)"
+        type: string
+        default: "75;80;86;89;120"
+      publish:
+        description: "Push the image to GHCR (release runs push automatically)"
+        type: boolean
+        default: false
+      image_tag:
+        description: "Image tag for a manual publish (empty: sha-<short>)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write   # attach the zip to the release
+  packages: write   # push the image to GHCR
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/tevenfeng/strata
+  DEFAULT_ARCHS: "75;80;86;89;120"
+
+jobs:
+  engine:
+    name: engine (compiled in the CUDA 13.0 devel image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h /
+
+      - name: Compile the engine (upstream Dockerfile)
+        env:
+          ARCHS: ${{ github.event.inputs.archs }}
+        run: |
+          ARCHS="${ARCHS:-$DEFAULT_ARCHS}"
+          echo "archs: $ARCHS"
+          docker build --build-arg CUDA_ARCHITECTURES="$ARCHS" -t strata-build .
+
+      - name: Extract engine and llama.cpp from the build image
+        run: |
+          cid=$(docker create strata-build)
+          mkdir -p ci-artifacts
+          docker cp "$cid:/opt/strata/engine" ci-artifacts/engine
+          docker cp "$cid:/opt/strata/third_party/llama.cpp" ci-artifacts/llama.cpp
+          docker rm "$cid"
+          ls -l ci-artifacts/engine
+
+      - name: Inspect the fatbin (informational)
+        run: |
+          docker run --rm -v "$PWD/ci-artifacts:/a" nvidia/cuda:13.0.0-devel-ubuntu24.04 bash -lc '
+            echo "strata cubins:"; cuobjdump --list-elf /a/engine/strata 2>/dev/null | grep -oE "sm_[0-9]+" | sort -u | tr "\n" " "; echo
+            echo "strata ptx:";    cuobjdump --list-ptx /a/engine/strata 2>/dev/null | grep -oE "compute_[0-9]+" | sort -u | tr "\n" " "; echo
+            echo "vision cubins:"; cuobjdump --list-elf /a/engine/strata-vision 2>/dev/null | grep -oE "sm_[0-9]+" | sort -u | tr "\n" " "; echo
+            if cuobjdump --list-ptx /a/engine/strata 2>/dev/null | grep -q "compute_"; then echo 1 > /a/ptx.txt; else echo 0 > /a/ptx.txt; fi
+          ' || echo 0 > ci-artifacts/ptx.txt
+
+      - name: Package the Linux prebuilt zip
+        run: |
+          mkdir -p pkg
+          cp ci-artifacts/engine/strata ci-artifacts/engine/strata-vision pkg/
+          PTX=$(cat ci-artifacts/ptx.txt 2>/dev/null || echo 0)
+          python3 - "$PTX" <<'PY'
+          import json, pathlib, sys, zipfile
+          ptx = (sys.argv[1] or "0").strip() == "1"
+          local = json.load(open("ci-artifacts/engine/BUILD.json"))
+          archs = sorted({int(a) for a in local.get("archs") or []})
+          rel = {"version": local["version"], "source": "release", "archs": archs,
+                 "vision_archs": archs, "ptx": ptx, "cuda": "13.0",
+                 "vision": local.get("vision", "gpu"), "portable": True}
+          pathlib.Path("pkg/BUILD.json").write_text(json.dumps(rel, indent=1) + "\n")
+          with zipfile.ZipFile("ci-artifacts/strata-linux-x64.zip", "w", zipfile.ZIP_DEFLATED) as z:
+              for f in ("strata", "strata-vision", "BUILD.json"):
+                  z.write(pathlib.Path("pkg") / f, f)
+          print("release BUILD.json:", rel)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strata-linux-x64
+          path: ci-artifacts/
+          if-no-files-found: error
+
+      - name: Attach the zip to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" ci-artifacts/strata-linux-x64.zip --clobber
+
+  image:
+    name: runtime image (slim, assembled from the prebuilt engine)
+    needs: engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: strata-linux-x64
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Assemble the image
+        run: |
+          docker buildx build --load \
+            --build-context engine="$RUNNER_TEMP/artifacts/engine" \
+            --build-context llama="$RUNNER_TEMP/artifacts/llama.cpp" \
+            --cache-from type=gha,scope=strata-image \
+            --cache-to type=gha,scope=strata-image,mode=min \
+            -f docker/Dockerfile.runtime \
+            -t strata-runtime .
+
+      - name: Smoke test (no GPU needed)
+        run: |
+          docker run --rm --entrypoint /opt/strata/.venv/bin/python strata-runtime -c "import numpy, jinja2, regex, yaml, tqdm, requests, PIL, psutil; print('python deps ok')"
+          docker run --rm --entrypoint sh strata-runtime -lc 'test -x engine/strata && test -x engine/strata-vision && test -f engine/BUILD.json && test -d third_party/llama.cpp/gguf-py && echo "files ok"'
+          size=$(docker image inspect strata-runtime --format '{{.Size}}')
+          echo "image size: $((size / 1024 / 1024)) MiB"
+          if [ "$size" -gt $((6 * 1024 * 1024 * 1024)) ]; then echo "::error::image larger than 6 GiB"; exit 1; fi
+
+      - name: Log in to GHCR
+        if: github.event_name == 'release' || github.event.inputs.publish == 'true'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Tag and push
+        if: github.event_name == 'release' || github.event.inputs.publish == 'true'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAGS="$IMAGE:$RELEASE_TAG $IMAGE:latest"
+          else
+            T="${IMAGE_TAG:-sha-$(echo "$GITHUB_SHA" | cut -c1-7)}"
+            TAGS="$IMAGE:$T"
+          fi
+          for t in $TAGS; do
+            docker tag strata-runtime "$t"
+            docker push "$t"
+            echo "pushed $t"
+          done
