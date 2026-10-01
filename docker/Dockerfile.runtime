@@ -49,6 +49,10 @@ RUN python3 -m venv .venv \
 COPY --from=engine /strata /strata-vision /BUILD.json /opt/strata/engine/
 COPY --from=llama / /opt/strata/third_party/llama.cpp/
 
+# The engine arrives through a build context (the CI artifact): make it executable
+# regardless of how that context was produced.
+RUN chmod +x /opt/strata/engine/strata /opt/strata/engine/strata-vision
+
 LABEL org.opencontainers.image.source="https://github.com/tevenfeng/Strata" \
       org.opencontainers.image.description="Strata: Qwen3.8-Flash-Next on consumer NVIDIA GPUs (prebuilt engine, slim image)"
 
