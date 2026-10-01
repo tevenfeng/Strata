@@ -24,7 +24,8 @@
 
 FROM nvidia/cuda:13.0.0-runtime-ubuntu24.04
 
-ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 LANG=C.UTF-8 STRATA_EXECV=1
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 LANG=C.UTF-8 STRATA_EXECV=1 \
+    PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl libatomic1 libgomp1 \
