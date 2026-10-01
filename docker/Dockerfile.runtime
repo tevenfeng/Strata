@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# Strata runtime image (slim): assembled by .github/workflows/build.yml from the
+# prebuilt engine artifact — NOTHING is compiled here, and the image carries no
+# compiler or CUDA toolkit (~3.5-4 GiB on disk, ~2 GB to pull, instead of the
+# ~8-9 GiB of a devel-stage build).  The engine is a fat binary for 75;80;86;89;120
+# (RTX 20/30/40/50, A-series) plus PTX.
+#
+# The workflow passes the prebuilt pieces as named build contexts:
+#   docker buildx build \
+#     --build-context engine=<dir with strata, strata-vision, BUILD.json> \
+#     --build-context llama=<dir with the extracted llama.cpp source tree> \
+#     -f docker/Dockerfile.runtime -t strata-runtime .
+# (For a from-source build without a prebuilt engine, use the upstream ./Dockerfile.)
+#
+# Run (host needs an NVIDIA driver >= 580 and nvidia-container-toolkit):
+#   docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 -v strata-data:/data \
+#     ghcr.io/tevenfeng/strata:latest
+# Setup choices are the env vars docker-entrypoint.sh documents (FAMILY, MODEL,
+# CONTEXT, VISION, KV, GPU/GPUS, LAYER_SPLIT, LOW_RAM, HOST, PORT, API_KEY, REINSTALL).
+#
+# A card outside the fatbin's arch set cannot be recompiled inside this image: build a
+# new image with the workflow's `archs` input set to that card (e.g. 89).
+
+FROM nvidia/cuda:13.0.0-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 LANG=C.UTF-8 STRATA_EXECV=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libatomic1 libgomp1 \
+        python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/strata
+COPY . .
+
+# Runtime Python deps, pinned by requirements.txt.  cmake and ninja stay as pinned:
+# setup.py's first start re-checks the pins and finds them satisfied (keeps first
+# starts working offline); nothing can compile here anyway (no compiler, no toolkit).
+RUN python3 -m venv .venv \
+    && .venv/bin/pip install --no-cache-dir --upgrade pip \
+    && .venv/bin/pip install --no-cache-dir -r requirements.txt \
+    && chmod +x docker-entrypoint.sh
+
+# The prebuilt engine (strata, strata-vision, BUILD.json with source=local and the
+# source hash, so the first start reuses it) and the llama.cpp tree (its gguf-py
+# serves the first-start pack tools).
+COPY --from=engine /strata /strata-vision /BUILD.json /opt/strata/engine/
+COPY --from=llama / /opt/strata/third_party/llama.cpp/
+
+LABEL org.opencontainers.image.source="https://github.com/tevenfeng/Strata" \
+      org.opencontainers.image.description="Strata: Qwen3.8-Flash-Next on consumer NVIDIA GPUs (prebuilt engine, slim image)"
+
+VOLUME ["/data"]
+EXPOSE 8080
+
+# /health is answered before the API key gate, so it works with or without one.
+# The port only opens after the model loads (1-3 minutes, longer on a first run),
+# so the start period is generous: a too short one marks a still-loading container
+# unhealthy and a restart policy would kill it mid-download.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
+  CMD curl -fs "http://127.0.0.1:${PORT:-8080}/health" || exit 1
+
+ENTRYPOINT ["./docker-entrypoint.sh"]
