@@ -3,7 +3,8 @@
 #            the same way the Windows release is built) and packages the Linux prebuilt
 #            zip: strata, strata-vision, BUILD.json — attached to the release.
 #   image  — assembles the slim runtime image from that prebuilt engine (no compiler,
-#            no CUDA toolkit inside) and pushes it to GHCR.
+#            no CUDA toolkit inside) and pushes it to GHCR, named for what is inside:
+#            <strata version>-cuda<major.minor>, e.g. v0.1.38-cuda13.0 (+ :latest).
 #
 # Runs when a release is published, or by hand from the Actions tab.
 # Runtime image: see docker/README.md. Upstream Dockerfile: ./Dockerfile.
@@ -23,7 +24,7 @@ on:
         type: boolean
         default: false
       image_tag:
-        description: "Image tag for a manual publish (empty: sha-<short>)"
+        description: "Image tag for a manual publish (empty: sha-<short>; -cuda13.0 is appended)"
         type: string
         default: ""
 
@@ -168,12 +169,19 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
         run: |
+          # The image name tells what is inside it: the Strata version and the CUDA toolkit
+          # of the runtime base - e.g. ghcr.io/tevenfeng/strata:v0.1.38-cuda13.0.  The CUDA
+          # part is read from docker/Dockerfile.runtime so it cannot drift from the base.
+          CUDA_SHORT=$(sed -nE 's|^FROM nvidia/cuda:([0-9]+\.[0-9]+)\..*|\1|p' docker/Dockerfile.runtime | head -1)
+          if [ -z "$CUDA_SHORT" ]; then echo "::error::cannot read the CUDA version from docker/Dockerfile.runtime"; exit 1; fi
+          CUDA="cuda$CUDA_SHORT"
           if [ "${{ github.event_name }}" = "release" ]; then
-            TAGS="$IMAGE:$RELEASE_TAG $IMAGE:latest"
+            TAGS="$IMAGE:$RELEASE_TAG-$CUDA $IMAGE:latest"
           else
             T="${IMAGE_TAG:-sha-$(echo "$GITHUB_SHA" | cut -c1-7)}"
-            TAGS="$IMAGE:$T"
+            case "$T" in *cuda*) TAGS="$IMAGE:$T" ;; *) TAGS="$IMAGE:$T-$CUDA" ;; esac
           fi
+          echo "image tags: $TAGS"
           for t in $TAGS; do
             docker tag strata-runtime "$t"
             docker push "$t"

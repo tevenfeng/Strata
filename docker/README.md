@@ -1,11 +1,17 @@
 # Strata runtime image (slim)
 
 Built by [`.github/workflows/build.yml`](../.github/workflows/build.yml) when a release is
-published, and pushed to GHCR:
+published, and pushed to GHCR. The tag names what is inside it — the Strata version and
+the CUDA toolkit of the runtime base:
 
 ```
-ghcr.io/tevenfeng/strata:<release tag>    # and :latest
+ghcr.io/tevenfeng/strata:v0.1.38-cuda13.0   # the newest release is also :latest
 ```
+
+The CUDA part is read from `docker/Dockerfile.runtime`
+(`nvidia/cuda:13.0.0-runtime-ubuntu24.04`), so the tag cannot drift from the base.
+Manual runs push `sha-<commit>-cuda13.0` (or the `image_tag` input with `-cuda13.0`
+appended unless it already names a CUDA version).
 
 The image is assembled from a prebuilt engine (`strata`, `strata-vision`, `BUILD.json`)
 and carries no compiler or CUDA toolkit — about 3.5-4 GiB on disk (~2 GB to pull),
@@ -25,7 +31,8 @@ docker run --rm --gpus all -p 8080:8080 \
 The first start downloads the model (~70 GB) into the `strata-data` volume; later
 starts go straight to serving. The environment variables (`MODEL`, `FAMILY`, `CONTEXT`,
 `VISION`, `KV`, `GPU`/`GPUS`, `LAYER_SPLIT`, `LOW_RAM`, `HOST`, `PORT`, `API_KEY`,
-`REINSTALL`) work as in the upstream README's Docker section.
+`REINSTALL`) work as in the upstream README's Docker section; `HF_ENDPOINT`
+(e.g. `https://hf-mirror.com`) makes every Hugging Face download use a mirror.
 
 ## Architectures
 
