@@ -199,7 +199,7 @@ jobs:
           if [ -z "$CUDA_SHORT" ]; then echo "::error::cannot read the CUDA version from docker/Dockerfile.runtime"; exit 1; fi
           CUDA="cuda$CUDA_SHORT"
           if [ "${{ github.event_name }}" = "release" ]; then
-            TAGS="$IMAGE:$RELEASE_TAG-$CUDA $IMAGE:latest"
+            TAGS="$IMAGE:$RELEASE_TAG-$CUDA"   # old-tag rebuild: :latest stays on the newest version
           else
             T="${IMAGE_TAG:-sha-$(echo "$GITHUB_SHA" | cut -c1-7)}"
             case "$T" in *cuda*) TAGS="$IMAGE:$T" ;; *) TAGS="$IMAGE:$T-$CUDA" ;; esac
