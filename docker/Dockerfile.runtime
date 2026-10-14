@@ -8,7 +8,8 @@
 #
 # The workflow passes the prebuilt pieces as named build contexts:
 #   docker buildx build \
-#     --build-context engine=<dir with strata, strata-vision, BUILD.json> \
+#     --build-context engine=<dir with the engine files: strata, strata-vision,
+#                                  BUILD.json, libstrata_kq.so when built> \
 #     --build-context llama=<dir with the extracted llama.cpp source tree> \
 #     -f docker/Dockerfile.runtime -t strata-runtime .
 # (For a from-source build without a prebuilt engine, use the upstream ./Dockerfile.)
@@ -43,10 +44,11 @@ RUN python3 -m venv .venv \
     && .venv/bin/pip install --no-cache-dir -r requirements.txt \
     && chmod +x docker-entrypoint.sh
 
-# The prebuilt engine (strata, strata-vision, BUILD.json with source=local and the
-# source hash, so the first start reuses it) and the llama.cpp tree (its gguf-py
-# serves the first-start pack tools).
-COPY --from=engine /strata /strata-vision /BUILD.json /opt/strata/engine/
+# The prebuilt engine (every file the artifact carries: strata, strata-vision,
+# BUILD.json with source=local and the source hash so the first start reuses it, and
+# libstrata_kq.so - the K-quant MMQ prompt library - when the build makes it) and the
+# llama.cpp tree (its gguf-py serves the first-start pack tools).
+COPY --from=engine / /opt/strata/engine/
 COPY --from=llama / /opt/strata/third_party/llama.cpp/
 
 # The engine arrives through a build context (the CI artifact): make it executable

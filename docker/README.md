@@ -66,4 +66,7 @@ docker buildx build \
 ```
 
 For a from-source build without a prebuilt engine, use the upstream `Dockerfile`
-instead.
+instead. The workflow passes `--build-arg STRATA_PORTABLE=ON` so the engine and the
+image encoder inside these artifacts are built for other PCs (AVX2 baseline, the
+release configuration); the Dockerfile's default (OFF) compiles native code for the
+machine that builds the image.

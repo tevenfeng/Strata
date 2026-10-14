@@ -62,8 +62,10 @@ jobs:
           echo "archs: $ARCHS"
           # --network host: the docker bridge on runners occasionally stalls large
           # downloads (pip).  Retries resume at the failed layer from BuildKit's cache.
+          # STRATA_PORTABLE=ON: the engine and the image encoder are built for other PCs
+          # (AVX2 baseline, the release configuration) - these artifacts are shipped.
           for attempt in 1 2 3; do
-            docker build --network host --build-arg CUDA_ARCHITECTURES="$ARCHS" -t strata-build . && break
+            docker build --network host --build-arg CUDA_ARCHITECTURES="$ARCHS" --build-arg STRATA_PORTABLE=ON -t strata-build . && break
             echo "::warning::docker build attempt $attempt failed"
             if [ "$attempt" = "3" ]; then exit 1; fi
             sleep 20
@@ -88,24 +90,42 @@ jobs:
             if cuobjdump --list-ptx /a/engine/strata 2>/dev/null | grep -q "\.ptx" || grep -aq "\.target sm_" /a/engine/strata; then echo 1 > /a/ptx.txt; else echo 0 > /a/ptx.txt; fi
           ' || echo 0 > ci-artifacts/ptx.txt
 
+      - name: Check the image encoder is portable (no AVX-512)
+        run: |
+          # objdump comes with build-essential inside the freshly built image (the plain
+          # CUDA devel image is not guaranteed to carry binutils).
+          docker run --rm --entrypoint bash strata-build -lc '
+            n=$(objdump -d /opt/strata/engine/strata-vision | grep -cE "zmm|%k[0-7]" || true)
+            echo "strata-vision AVX-512 (zmm / mask-register) instructions: $n"
+            if [ "$n" != "0" ]; then
+              echo "::error::strata-vision contains AVX-512: it was built native, not for other PCs (#411)"
+              exit 1
+            fi
+            echo "strata-vision is the portable AVX2 build"'
+
       - name: Package the Linux prebuilt zip
         run: |
           mkdir -p pkg
-          cp ci-artifacts/engine/strata ci-artifacts/engine/strata-vision pkg/
+          # every file the engine build produced: strata, strata-vision, BUILD.json, and
+          # libstrata_kq.so (the K-quant MMQ prompt library) when the build makes it
+          cp -a ci-artifacts/engine/. pkg/
           PTX=$(cat ci-artifacts/ptx.txt 2>/dev/null || echo 0)
           python3 - "$PTX" <<'PY'
           import json, pathlib, sys, zipfile
           ptx = (sys.argv[1] or "0").strip() == "1"
+          pkg = pathlib.Path("pkg")
           local = json.load(open("ci-artifacts/engine/BUILD.json"))
           archs = sorted({int(a) for a in local.get("archs") or []})
           rel = {"version": local["version"], "source": "release", "archs": archs,
                  "vision_archs": archs, "ptx": ptx, "cuda": "13.0",
                  "vision": local.get("vision", "gpu"), "portable": True}
-          pathlib.Path("pkg/BUILD.json").write_text(json.dumps(rel, indent=1) + "\n")
+          (pkg / "BUILD.json").write_text(json.dumps(rel, indent=1) + "\n")
+          files = sorted(f for f in pkg.iterdir() if f.is_file())
           with zipfile.ZipFile("ci-artifacts/strata-linux-x64.zip", "w", zipfile.ZIP_DEFLATED) as z:
-              for f in ("strata", "strata-vision", "BUILD.json"):
-                  z.write(pathlib.Path("pkg") / f, f)
+              for f in files:
+                  z.write(f, f.name)
           print("release BUILD.json:", rel)
+          print("zip files:", [f.name for f in files])
           PY
 
       - uses: actions/upload-artifact@v4
@@ -148,12 +168,15 @@ jobs:
       - name: Smoke test (no GPU needed)
         run: |
           docker run --rm --entrypoint /opt/strata/.venv/bin/python strata-runtime -c "import numpy, jinja2, regex, yaml, tqdm, requests, PIL, psutil; print('python deps ok')"
-          docker run --rm --entrypoint sh strata-runtime -lc '
+          WANT_LIB=""
+          if [ -f "$RUNNER_TEMP/artifacts/engine/libstrata_kq.so" ]; then WANT_LIB=1; fi
+          docker run --rm -e WANT_LIB="$WANT_LIB" --entrypoint sh strata-runtime -lc '
             pwd; ls -l engine/
             test -x engine/strata || { echo "engine/strata not executable"; exit 1; }
             test -x engine/strata-vision || { echo "engine/strata-vision not executable"; exit 1; }
             test -f engine/BUILD.json || { echo "engine/BUILD.json missing"; exit 1; }
             test -d third_party/llama.cpp/gguf-py || { echo "third_party/llama.cpp/gguf-py missing"; exit 1; }
+            if [ -n "$WANT_LIB" ]; then test -f engine/libstrata_kq.so || { echo "libstrata_kq.so missing in the image"; exit 1; }; echo "kq lib ok"; fi
             echo "files ok"'
           size=$(docker image inspect strata-runtime --format '{{.Size}}')
           echo "image size: $((size / 1024 / 1024)) MiB"
